@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+
+echo "================================================"
+echo " LINUX MACHINE AUDIT"
+echo "================================================"
+echo "Host: $(hostname)"
+echo "Date: $(date)"
+echo "Kernel: $(uname -r)"
+echo "Uptime: $(uptime -p)"
+echo
+
+########################################
+echo "=============== CPU ================="
+########################################
+if command -v lscpu >/dev/null; then
+    lscpu | grep -E 'Model name|Socket|Core|Thread|CPU\(s\)|MHz|Vendor'
+else
+    cat /proc/cpuinfo | grep "model name" | head -1
+fi
+echo
+
+########################################
+echo "=============== RAM ================="
+########################################
+free -h
+echo
+
+########################################
+echo "============== GPU =================="
+########################################
+if command -v nvidia-smi >/dev/null; then
+    echo "NVIDIA GPU detected"
+    nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+else
+    lspci | grep -i -E "vga|3d|display" || echo "No GPU detected"
+fi
+echo
+
+########################################
+echo "============= STORAGE ==============="
+########################################
+lsblk -d -o NAME,MODEL,SIZE,ROTA,TRAN
+echo
+echo "Mounted Filesystems:"
+df -hT --exclude-type=tmpfs --exclude-type=devtmpfs
+echo
+
+########################################
+echo "=========== DISK HEALTH ============="
+########################################
+if command -v smartctl >/dev/null; then
+    for disk in /dev/sd? /dev/nvme?n?; do
+        if [ -b "$disk" ]; then
+            echo "SMART status for $disk"
+            sudo smartctl -H $disk 2>/dev/null | grep result
+            echo
+        fi
+    done
+else
+    echo "smartctl not installed (install smartmontools)"
+fi
+echo
+
+########################################
+echo "========== FILESYSTEM TYPE =========="
+########################################
+lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT
+echo
+
+########################################
+echo "============== NETWORK =============="
+########################################
+ip -br addr
+echo
+
+echo "Active listening ports:"
+ss -tuln | head -20
+echo
+
+########################################
+echo "============= DOCKER ================"
+########################################
+if command -v docker >/dev/null; then
+    echo "Docker version:"
+    docker --version
+    echo
+    echo "Running containers:"
+    docker ps
+else
+    echo "Docker not installed"
+fi
+echo
+
+########################################
+echo "========== VIRTUALIZATION ==========="
+########################################
+if command -v systemd-detect-virt >/dev/null; then
+    systemd-detect-virt
+else
+    echo "Cannot detect virtualization"
+fi
+echo
+
+########################################
+echo "============= TOP MEMORY ============"
+########################################
+ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%mem | head -10
+echo
+
+########################################
+echo "============= TOP CPU ==============="
+########################################
+ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%cpu | head -10
+echo
+
+echo "================================================"
+echo " END OF REPORT"
+echo "================================================"
