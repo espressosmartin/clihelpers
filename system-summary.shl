@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+echo "=============================="
+echo " System Hardware Summary"
+echo "=============================="
+echo
+
+# Hostname
+echo "Host: $(hostname)"
+echo "Date: $(date)"
+echo
+
+echo "----- CPU -----"
+lscpu | grep -E 'Model name|Socket|Core|Thread|CPU\(s\)|MHz'
+echo
+
+echo "----- RAM -----"
+free -h
+echo
+
+echo "----- Disks (Physical) -----"
+lsblk -d -o NAME,MODEL,SIZE,TRAN
+echo
+
+echo "----- Filesystem Usage -----"
+df -hT --exclude-type=tmpfs --exclude-type=devtmpfs
+echo
+
+echo "----- Block Device Details -----"
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,MODEL
+echo
