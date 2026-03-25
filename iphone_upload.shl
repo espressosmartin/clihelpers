@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# --- Config ---
+MOUNT_POINT="${MOUNT_POINT:-iphone_mh}"
+ROOT_ON_IPHONE="${ROOT_ON_IPHONE:-$MOUNT_POINT/DCIM}"
+STATE_DIR="${STATE_DIR:-$HOME/.local/state/immich-iphone}"
+STATE_FILE="${STATE_FILE:-$STATE_DIR/last_success.ts}"
+LOG_FILE="${LOG_FILE:-$STATE_DIR/run.log}"
+LOCK_FILE="${LOCK_FILE:-$STATE_DIR/lock}"
+UNMOUNT_ON_EXIT="${UNMOUNT_ON_EXIT:-1}"
+
+# Immich CLI args, e.g. "--recursive --dry-run"
+IMMICH_ARGS="${IMMICH_ARGS:---recursive}"
+
+# Media extensions to scan
+MEDIA_EXTS=(heic jpg jpeg png gif tif tiff mp4 mov m4v avi heif hevc dng)
+
+# --- Helpers ---
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"
+}
+
+mount_iphone() {
+  mkdir -p "$MOUNT_POINT"
+
+  if mountpoint -q "$MOUNT_POINT"; then
+    echo "iPhone already mounted at $MOUNT_POINT"
+    return
+  fi
+
+  echo "Mounting iPhone..."
+  ifuse "$MOUNT_POINT" || die "Failed to mount iPhone. Make sure it is unlocked and trusted."
+}
+
+unmount_iphone() {
+  if [[ "${UNMOUNT_ON_EXIT}" != "1" ]]; then
+    return
+  fi
+
+  if mountpoint -q "$MOUNT_POINT"; then
+    echo "Unmounting iPhone..."
+    fusermount -u "$MOUNT_POINT" 2>/dev/null || umount "$MOUNT_POINT" 2>/dev/null || \
+      echo "Warning: failed to unmount cleanly"
+  fi
+}
+
+cleanup() {
+  flock -u 200 || true
+  unmount_iphone
+}
+
+trap cleanup EXIT
+
+# --- Checks ---
+require ifuse
+require immich
+require find
+require awk
+require sort
+require date
+require mountpoint
+require flock
+
+mkdir -p "$STATE_DIR"
+
+# Single-run lock
+exec 200>"$LOCK_FILE"
+flock -n 200 || die "Another run is already in progress."
+
+# --- Mount ---
+mount_iphone
+
+# --- Sanity check ---
+[[ -d "$ROOT_ON_IPHONE" ]] || die "No DCIM directory found at $ROOT_ON_IPHONE"
+
+# --- Last successful timestamp ---
+if [[ -f "$STATE_FILE" ]]; then
+  LAST_TS="$(cat "$STATE_FILE")"
+else
+  LAST_TS="1970-01-01 00:00:00"
+fi
+
+echo "Last successful cutoff: $LAST_TS"
+
+# --- Build find extension filter ---
+FIND_EXPR=()
+for ext in "${MEDIA_EXTS[@]}"; do
+  FIND_EXPR+=( -iname "*.${ext}" -o )
+done
+unset 'FIND_EXPR[${#FIND_EXPR[@]}-1]'  # remove trailing -o
+
+# --- Find directories containing files newer than last run ---
+mapfile -t CANDIDATE_DIRS < <(
+  find "$ROOT_ON_IPHONE" -type f \( "${FIND_EXPR[@]}" \) -newermt "$LAST_TS" 2>/dev/null |
+    awk -F/ '{
+      $NF=""
+      OFS="/"
+      print $0
+    }' |
+    sed 's#/$##' |
+    sort -u
+)
+
+if (( ${#CANDIDATE_DIRS[@]} == 0 )); then
+  echo "Nothing new since $LAST_TS"
+  exit 0
+fi
+
+echo "Found ${#CANDIDATE_DIRS[@]} directories with new/updated media"
+
+# --- Upload changed directories ---
+UPLOAD_ERRORS=0
+MAX_MTIME_EPOCH=0
+
+for dir in "${CANDIDATE_DIRS[@]}"; do
+  echo "Uploading: $dir"
+
+  if ! immich upload $IMMICH_ARGS "$dir"; then
+    echo "$(date -Is) Upload failed: $dir" >> "$LOG_FILE"
+    ((UPLOAD_ERRORS++))
+    continue
+  fi
+
+  mt_epoch="$(
+    find "$dir" -type f -printf '%T@\n' 2>/dev/null | sort -nr | head -n1 || echo 0
+  )"
+  mt_epoch="${mt_epoch%.*}"
+
+  if [[ -n "$mt_epoch" && "$mt_epoch" -gt "$MAX_MTIME_EPOCH" ]]; then
+    MAX_MTIME_EPOCH="$mt_epoch"
+  fi
+done
+
+# --- Update state only after successful uploads ---
+if [[ "$MAX_MTIME_EPOCH" -gt 0 ]]; then
+  NEW_CUTOFF="$(date -u -d "@$MAX_MTIME_EPOCH" '+%Y-%m-%d %H:%M:%S')"
+  echo "$NEW_CUTOFF" > "$STATE_FILE"
+  echo "$(date -Is) Updated cutoff to $NEW_CUTOFF" >> "$LOG_FILE"
+  echo "Updated last-success cutoff to: $NEW_CUTOFF"
+fi
+
+if (( UPLOAD_ERRORS > 0 )); then
+  die "Completed with $UPLOAD_ERRORS upload error(s). Check $LOG_FILE"
+fi
+
+echo "Done."
