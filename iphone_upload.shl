@@ -1,4 +1,64 @@
 #!/usr/bin/env bash
+
+#!/usr/bin/env bash
+#
+# ============================================================
+# 📱 iPhone → Immich Incremental Upload Script (No Duplication)
+# ============================================================
+#
+# WHAT THIS DOES
+# --------------
+# - Mounts an iPhone using `ifuse`
+# - Scans the DCIM folder for NEW or UPDATED media files
+# - Uploads only those (by directory) to Immich
+# - Avoids re-uploading everything on every run
+# - Stores only a tiny timestamp file (no photo duplication locally)
+#
+# WHY THIS IS USEFUL
+# ------------------
+# - No rsync / no local copy → saves disk space
+# - No manual folder selection (e.g. 347APPLE etc)
+# - Fast re-runs using timestamp-based detection
+# - Safe: Immich deduplicates using hashes
+#
+# HOW IT WORKS
+# ------------
+# 1. Mount iPhone via ifuse
+# 2. Read last successful timestamp from state file
+# 3. Find files newer than that timestamp
+# 4. Extract unique directories containing those files
+# 5. Upload each directory via `immich upload`
+# 6. Update timestamp based on newest file seen
+# 7. Unmount iPhone
+#
+# REQUIREMENTS
+# ------------
+# - ifuse (libimobiledevice)
+# - immich CLI configured (API key + URL)
+# - Linux / macOS with FUSE support
+#
+# IMPORTANT NOTES
+# ---------------
+# - iPhone must be:
+#   - Unlocked
+#   - Trusted on the computer
+# - First run will process everything
+# - If something goes wrong, delete the state file to reset:
+#     ~/.local/state/immich-iphone/last_success.ts
+#
+# USAGE
+# -----
+# chmod +x script.sh
+# ./script.sh
+#
+# OPTIONAL ENV VARS
+# -----------------
+# MOUNT_POINT=iphone_mh
+# STATE_DIR=~/.local/state/immich-iphone
+# IMMICH_ARGS="--recursive --concurrency 5"
+#
+# ============================================================
+
 set -Eeuo pipefail
 
 # --- Config ---
