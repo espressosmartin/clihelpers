@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+
+: <<'README'
+ComfyUI Runner Script
+====================
+
+Runs ComfyUI inside a Conda environment with full, real-time logging.
+
+Key Features:
+-------------
+- Uses `conda run` (no fragile `conda activate`)
+- Streams live output (fixes "no logs showing" issue)
+- Pulls latest code from git
+- Optionally installs dependencies
+- Configurable via environment variables
+
+Defaults:
+---------
+CONDA_ENV   = comfy
+COMFY_DIR   = ~/ComfyUI
+INSTALL_DEPS = true
+
+Usage:
+------
+Run normally:
+    ./run-comfy.sh
+
+Skip dependency install (faster startup):
+    INSTALL_DEPS=false ./run-comfy.sh
+
+Use a different environment:
+    CONDA_ENV=myenv ./run-comfy.sh
+
+Use a different directory:
+    COMFY_DIR=/path/to/ComfyUI ./run-comfy.sh
+
+Example (recommended daily use):
+    INSTALL_DEPS=false ./run-comfy.sh
+
+Logging:
+--------
+- Output is streamed live to terminal
+- Python runs unbuffered (`-u`)
+- `--no-capture-output` ensures Conda does not hide logs
+
+Optional: save logs to file
+    ./run-comfy.sh 2>&1 | tee comfy.log
+
+Requirements:
+-------------
+- Conda installed (Miniconda/Anaconda)
+- Environment already created (e.g. `comfy`)
+- ComfyUI repo already cloned
+
+Notes:
+------
+- Script exits immediately if any step fails (`set -e`)
+- Uses `exec` so ComfyUI replaces the shell process
+- If you see no output, something is wrong (this script forces logs)
+README
+
+set -e
+
+# ---- Config (override via env vars) ----
+CONDA_ENV="${CONDA_ENV:-comfy}"
+COMFY_DIR="${COMFY_DIR:-$HOME/ComfyUI}"
+INSTALL_DEPS="${INSTALL_DEPS:-true}"
+
+echo "Using env: $CONDA_ENV"
+echo "Using dir: $COMFY_DIR"
+
+cd "$COMFY_DIR" || { echo "Directory not found: $COMFY_DIR"; exit 1; }
+
+# ---- Update repo ----
+echo "Updating repo..."
+git pull origin master
+
+# ---- Install deps (optional) ----
+if [ "$INSTALL_DEPS" = "true" ]; then
+  echo "Installing requirements..."
+  conda run --no-capture-output -n "$CONDA_ENV" python -m pip install -r requirements.txt
+else
+  echo "Skipping dependency install"
+fi
+
+# ---- Run ComfyUI (with live logs) ----
+echo "Starting ComfyUI with live output..."
+exec conda run --no-capture-output -n "$CONDA_ENV" python -u ./main.py --listen
