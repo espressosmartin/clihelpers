@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+#
+# fail2ban-summary.sh
+#
+# Simple Fail2Ban summary script
+#
+# What it shows:
+# - Whether fail2ban is running
+# - Active jails
+# - Per-jail:
+#   - currently failed
+#   - total failed
+#   - currently banned
+#   - total banned
+#   - banned IP list
+# - Recent Ban / Unban log entries
+#
+# Usage:
+#   chmod +x fail2ban-summary.sh
+#   ./fail2ban-summary.sh
+#
+# Notes:
+# - Run as root or with sudo for best results:
+#     sudo ./fail2ban-summary.sh
+# - Tries /var/log/fail2ban.log first
+# - Falls back to journalctl if the log file is missing
+#
+
+set -u
+
+FAIL2BAN_LOG="/var/log/fail2ban.log"
+
+have_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+print_line() {
+    printf '%*s\n' "${COLUMNS:-80}" '' | tr ' ' '-'
+}
+
+get_jails() {
+    sudo fail2ban-client status 2>/dev/null \
+        | awk -F':' '/Jail list/ {print $2}' \
+        | tr ',' '\n' \
+        | sed 's/^ *//; s/ *$//' \
+        | sed '/^$/d'
+}
+
+get_metric() {
+    local jail="$1"
+    local label="$2"
+
+    sudo fail2ban-client status "$jail" 2>/dev/null \
+        | awk -F':' -v key="$label" '
+            $0 ~ key {
+                gsub(/^[ \t]+|[ \t]+$/, "", $2)
+                print $2
+                exit
+            }
+        '
+}
+
+get_banned_ips() {
+    local jail="$1"
+    sudo fail2ban-client status "$jail" 2>/dev/null \
+        | awk -F':' '/Banned IP list/ {
+            sub(/^[ \t]+/, "", $2)
+            print $2
+            exit
+        }'
+}
+
+show_recent_events() {
+    echo "Recent Ban/Unban events"
+    print_line
+
+    if [[ -f "$FAIL2BAN_LOG" ]]; then
+        grep -E 'Ban |Unban ' "$FAIL2BAN_LOG" 2>/dev/null | tail -n 20
+    elif have_cmd journalctl; then
+        sudo journalctl -u fail2ban --no-pager 2>/dev/null | grep -E 'Ban |Unban ' | tail -n 20
+    else
+        echo "No fail2ban log file found, and journalctl is not available."
+    fi
+    echo
+}
+
+main() {
+    if ! have_cmd fail2ban-client; then
+        echo "fail2ban-client not found. Is fail2ban installed?"
+        exit 1
+    fi
+
+    echo "Fail2Ban summary"
+    print_line
+    echo "Host: $(hostname)"
+    echo "Time: $(date)"
+    echo
+
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        echo "Service: running"
+    else
+        echo "Service: not running or not managed by systemd"
+    fi
+    echo
+
+    local jails
+    jails="$(get_jails)"
+
+    if [[ -z "$jails" ]]; then
+        echo "No active jails found."
+        echo
+        show_recent_events
+        exit 0
+    fi
+
+    echo "Active jails:"
+    echo "$jails" | sed 's/^/ - /'
+    echo
+
+    local total_current_failed=0
+    local total_failed=0
+    local total_current_banned=0
+    local total_banned=0
+
+    while IFS= read -r jail; do
+        [[ -z "$jail" ]] && continue
+
+        local current_failed
+        local total_failed_jail
+        local current_banned
+        local total_banned_jail
+        local banned_ips
+
+        current_failed="$(get_metric "$jail" "Currently failed")"
+        total_failed_jail="$(get_metric "$jail" "Total failed")"
+        current_banned="$(get_metric "$jail" "Currently banned")"
+        total_banned_jail="$(get_metric "$jail" "Total banned")"
+        banned_ips="$(get_banned_ips "$jail")"
+
+        current_failed="${current_failed:-0}"
+        total_failed_jail="${total_failed_jail:-0}"
+        current_banned="${current_banned:-0}"
+        total_banned_jail="${total_banned_jail:-0}"
+
+        total_current_failed=$((total_current_failed + current_failed))
+        total_failed=$((total_failed + total_failed_jail))
+        total_current_banned=$((total_current_banned + current_banned))
+        total_banned=$((total_banned + total_banned_jail))
+
+        echo "Jail: $jail"
+        print_line
+        echo "Currently failed : $current_failed"
+        echo "Total failed     : $total_failed_jail"
+        echo "Currently banned : $current_banned"
+        echo "Total banned     : $total_banned_jail"
+        if [[ -n "$banned_ips" ]]; then
+            echo "Banned IPs       : $banned_ips"
+        else
+            echo "Banned IPs       : none"
+        fi
+        echo
+    done <<< "$jails"
+
+    echo "Totals across all jails"
+    print_line
+    echo "Currently failed : $total_current_failed"
+    echo "Total failed     : $total_failed"
+    echo "Currently banned : $total_current_banned"
+    echo "Total banned     : $total_banned"
+    echo
+
+    show_recent_events
+}
+
+main "$@"
