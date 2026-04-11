@@ -1,15 +1,41 @@
 #!/bin/bash
 
-# macOS network diagnostic logger
-# Logs interface state, gateway reachability, internet reachability, and DNS health.
+# -------- DEFAULT CONFIG (can be overridden) --------
+INTERVAL="${INTERVAL:-5}"                         # seconds
+LOG_DIR="${LOG_DIR:-$HOME}"                       # log folder
+TEST_IP="${TEST_IP:-8.8.8.8}"
+TEST_HOST="${TEST_HOST:-google.com}"
+# ---------------------------------------------------
 
-LOGFILE="${HOME}/net-debug-$(date +%Y%m%d-%H%M%S).log"
-INTERVAL=5
+# -------- CLI overrides --------
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --interval)
+      INTERVAL="$2"
+      shift 2
+      ;;
+    --log-dir)
+      LOG_DIR="$2"
+      shift 2
+      ;;
+    --ip)
+      TEST_IP="$2"
+      shift 2
+      ;;
+    --host)
+      TEST_HOST="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+# --------------------------------
 
-# -------- config you can change --------
-TEST_IP="8.8.8.8"
-TEST_HOST="google.com"
-# --------------------------------------
+mkdir -p "$LOG_DIR"
+LOGFILE="${LOG_DIR}/net-debug-$(date +%Y%m%d-%H%M%S).log"
 
 get_default_interface() {
   route get default 2>/dev/null | awk '/interface: / {print $2; exit}'
@@ -35,6 +61,7 @@ log_header() {
     echo "Network diagnostic started: $(date)"
     echo "Log file: $LOGFILE"
     echo "Interval: ${INTERVAL}s"
+    echo "Log dir: $LOG_DIR"
     echo "Test IP: $TEST_IP"
     echo "Test host: $TEST_HOST"
     echo "============================================================"
@@ -54,30 +81,14 @@ log_snapshot() {
   local resolve_result="N/A"
 
   if [[ -n "$gateway" ]]; then
-    if ping -c 1 -t 2 "$gateway" >/dev/null 2>&1; then
-      router_result="OK"
-    else
-      router_result="FAIL"
-    fi
+    ping -c 1 -t 2 "$gateway" >/dev/null 2>&1 && router_result="OK" || router_result="FAIL"
   fi
 
-  if ping -c 1 -t 2 "$TEST_IP" >/dev/null 2>&1; then
-    ip_result="OK"
-  else
-    ip_result="FAIL"
-  fi
+  ping -c 1 -t 2 "$TEST_IP" >/dev/null 2>&1 && ip_result="OK" || ip_result="FAIL"
 
-  if dscacheutil -q host -a name "$TEST_HOST" >/dev/null 2>&1; then
-    resolve_result="OK"
-  else
-    resolve_result="FAIL"
-  fi
+  dscacheutil -q host -a name "$TEST_HOST" >/dev/null 2>&1 && resolve_result="OK" || resolve_result="FAIL"
 
-  if ping -c 1 -t 2 "$TEST_HOST" >/dev/null 2>&1; then
-    dns_result="OK"
-  else
-    dns_result="FAIL"
-  fi
+  ping -c 1 -t 2 "$TEST_HOST" >/dev/null 2>&1 && dns_result="OK" || dns_result="FAIL"
 
   {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')]"
@@ -101,25 +112,10 @@ log_changes() {
   status="$(get_link_status "$iface")"
   now="$(date '+%Y-%m-%d %H:%M:%S')"
 
-  if [[ "$iface" != "$LAST_IFACE" ]]; then
-    echo "[$now] CHANGE: interface changed: '$LAST_IFACE' -> '$iface'" | tee -a "$LOGFILE"
-    LAST_IFACE="$iface"
-  fi
-
-  if [[ "$gateway" != "$LAST_GATEWAY" ]]; then
-    echo "[$now] CHANGE: gateway changed: '$LAST_GATEWAY' -> '$gateway'" | tee -a "$LOGFILE"
-    LAST_GATEWAY="$gateway"
-  fi
-
-  if [[ "$ipaddr" != "$LAST_IP" ]]; then
-    echo "[$now] CHANGE: IP changed: '$LAST_IP' -> '$ipaddr'" | tee -a "$LOGFILE"
-    LAST_IP="$ipaddr"
-  fi
-
-  if [[ "$status" != "$LAST_STATUS" ]]; then
-    echo "[$now] CHANGE: link status changed: '$LAST_STATUS' -> '$status'" | tee -a "$LOGFILE"
-    LAST_STATUS="$status"
-  fi
+  [[ "$iface" != "$LAST_IFACE" ]] && echo "[$now] CHANGE: interface '$LAST_IFACE' -> '$iface'" | tee -a "$LOGFILE" && LAST_IFACE="$iface"
+  [[ "$gateway" != "$LAST_GATEWAY" ]] && echo "[$now] CHANGE: gateway '$LAST_GATEWAY' -> '$gateway'" | tee -a "$LOGFILE" && LAST_GATEWAY="$gateway"
+  [[ "$ipaddr" != "$LAST_IP" ]] && echo "[$now] CHANGE: IP '$LAST_IP' -> '$ipaddr'" | tee -a "$LOGFILE" && LAST_IP="$ipaddr"
+  [[ "$status" != "$LAST_STATUS" ]] && echo "[$now] CHANGE: link '$LAST_STATUS' -> '$status'" | tee -a "$LOGFILE" && LAST_STATUS="$status"
 }
 
 trap 'echo; echo "Stopped: $(date)" | tee -a "$LOGFILE"; exit 0' INT TERM
