@@ -46,4 +46,4 @@ END $$
 
 DELIMITER ;
 
-CALL count_all_tables('dome');
+CALL count_all_tables('mysql-database-name');
