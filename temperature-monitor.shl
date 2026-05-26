@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+
+# temp-monitor.sh
+
+INTERVAL=5
+
+RED="\033[0;31m"
+YELLOW="\033[1;33m"
+GREEN="\033[0;32m"
+BLUE="\033[0;34m"
+NC="\033[0m"
+
+#
+# REQUIRED COMMANDS
+#
+declare -A REQUIRED_CMDS=(
+    ["sensors"]="lm-sensors"
+    ["awk"]="gawk"
+    ["grep"]="grep"
+    ["uptime"]="coreutils"
+)
+
+#
+# OPTIONAL COMMANDS
+#
+declare -A OPTIONAL_CMDS=(
+    ["nvidia-smi"]="nvidia-driver / NVIDIA toolkit"
+    ["nvme"]="nvme-cli"
+)
+
+echo -e "${BLUE}Checking dependencies...${NC}"
+echo
+
+MISSING_REQUIRED=0
+
+#
+# CHECK REQUIRED
+#
+for CMD in "${!REQUIRED_CMDS[@]}"; do
+
+    if ! command -v "$CMD" >/dev/null 2>&1; then
+        echo -e "${RED}Missing required command:${NC} $CMD"
+        echo "Install package: ${REQUIRED_CMDS[$CMD]}"
+        echo
+        MISSING_REQUIRED=1
+    else
+        echo -e "${GREEN}Found:${NC} $CMD"
+    fi
+done
+
+echo
+
+#
+# CHECK OPTIONAL
+#
+for CMD in "${!OPTIONAL_CMDS[@]}"; do
+
+    if ! command -v "$CMD" >/dev/null 2>&1; then
+        echo -e "${YELLOW}Optional command missing:${NC} $CMD"
+        echo "Install package: ${OPTIONAL_CMDS[$CMD]}"
+        echo
+    else
+        echo -e "${GREEN}Found:${NC} $CMD"
+    fi
+done
+
+echo
+
+if [[ "$MISSING_REQUIRED" -eq 1 ]]; then
+    echo -e "${RED}Cannot continue until required packages are installed.${NC}"
+    exit 1
+fi
+
+sleep 2
+
+#
+# MAIN LOOP
+#
+while true; do
+
+    clear
+
+    echo "========================================="
+    echo " System Temperature Monitor"
+    echo " $(date)"
+    echo "========================================="
+    echo
+
+    #
+    # CPU TEMPERATURES
+    #
+    echo "CPU:"
+
+    if command -v sensors >/dev/null 2>&1; then
+
+        sensors 2>/dev/null | \
+            grep -E 'Tctl|Tdie|Package id 0|Core 0' | \
+            head -5
+
+        CPU_TEMP=$(sensors 2>/dev/null | \
+            grep 'Tctl:' | \
+            awk '{gsub(/\+|°C/,"",$2); print int($2)}' | \
+            head -1)
+
+        if [[ -n "$CPU_TEMP" ]]; then
+
+            if (( CPU_TEMP >= 90 )); then
+                echo -e "${RED}CPU VERY HOT${NC}"
+            elif (( CPU_TEMP >= 80 )); then
+                echo -e "${YELLOW}CPU WARM${NC}"
+            else
+                echo -e "${GREEN}CPU OK${NC}"
+            fi
+        fi
+    fi
+
+    echo
+    echo "-----------------------------------------"
+    echo
+
+    #
+    # NVIDIA GPU
+    #
+    echo "NVIDIA GPU:"
+
+    if command -v nvidia-smi >/dev/null 2>&1; then
+
+        nvidia-smi \
+            --query-gpu=name,temperature.gpu,utilization.gpu,fan.speed,power.draw,memory.used,memory.total \
+            --format=csv,noheader,nounits | \
+        while IFS=',' read -r NAME TEMP UTIL FAN POWER MEMUSED MEMTOTAL; do
+
+            echo "GPU        : $NAME"
+            echo "Temp       : ${TEMP}°C"
+            echo "Utilization: ${UTIL}%"
+            echo "Fan        : ${FAN}%"
+            echo "Power      : ${POWER}W"
+            echo "VRAM       : ${MEMUSED}MB / ${MEMTOTAL}MB"
+
+            if (( TEMP >= 85 )); then
+                echo -e "${RED}GPU VERY HOT${NC}"
+            elif (( TEMP >= 75 )); then
+                echo -e "${YELLOW}GPU WARM${NC}"
+            else
+                echo -e "${GREEN}GPU OK${NC}"
+            fi
+        done
+
+    else
+        echo -e "${YELLOW}nvidia-smi not installed${NC}"
+    fi
+
+    echo
+    echo "-----------------------------------------"
+    echo
+
+    #
+    # NVME
+    #
+    echo "NVMe SSDs:"
+
+    if command -v nvme >/dev/null 2>&1; then
+
+        for DEV in /dev/nvme*n1; do
+
+            [[ -e "$DEV" ]] || continue
+
+            TEMP=$(sudo nvme smart-log "$DEV" 2>/dev/null | \
+                grep '^temperature' | \
+                awk '{print $3}')
+
+            echo "$DEV : ${TEMP}°C"
+
+            if [[ -n "$TEMP" ]]; then
+
+                if (( TEMP >= 70 )); then
+                    echo -e "${RED}SSD HOT${NC}"
+                elif (( TEMP >= 60 )); then
+                    echo -e "${YELLOW}SSD WARM${NC}"
+                else
+                    echo -e "${GREEN}SSD OK${NC}"
+                fi
+            fi
+        done
+
+    else
+        echo -e "${YELLOW}nvme-cli not installed${NC}"
+    fi
+
+    echo
+    echo "-----------------------------------------"
+    echo
+
+    #
+    # LOAD
+    #
+    echo "Load:"
+    uptime
+
+    echo
+    echo "Updating every ${INTERVAL}s..."
+    sleep "$INTERVAL"
+
+done
