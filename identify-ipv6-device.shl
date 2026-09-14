@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+
+set -u
+set -o pipefail
+
+usage() {
+  cat <<'EOF'
+Identify a local device from one of its IPv6 addresses.
+
+Usage:
+  identify-ipv6-device.sh <IPv6-address> [network-interface]
+
+Examples:
+  ./identify-ipv6-device.sh 2a02:8012:9fb8:0:1739:7caf:f608:e61e
+  ./identify-ipv6-device.sh 2a02:8012:9fb8:0:1739:7caf:f608:e61e enp113s0
+
+The script pings the address, checks the Linux neighbour cache for its MAC
+address, and lists other cached IPv4/IPv6 addresses belonging to that MAC.
+It does not need sudo and does not scan the whole network.
+EOF
+}
+
+if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  usage >&2
+  exit 2
+fi
+
+for command_name in ip ping awk grep getent sort; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    printf 'Error: required command not found: %s\n' "$command_name" >&2
+    exit 1
+  fi
+done
+
+target=${1#[}
+target=${target%]}
+requested_interface=${2:-}
+
+if ! route_line=$(ip -6 route get "$target" 2>/dev/null); then
+  printf 'Error: %s is not a valid or routable IPv6 address.\n' "$target" >&2
+  exit 2
+fi
+
+if [[ -n $requested_interface ]]; then
+  interface=$requested_interface
+else
+  interface=$(awk '{
+    for (i = 1; i <= NF; i++) {
+      if ($i == "dev") {
+        print $(i + 1)
+        exit
+      }
+    }
+  }' <<<"$route_line")
+fi
+
+if [[ -z ${interface:-} ]] || ! ip link show dev "$interface" >/dev/null 2>&1; then
+  printf 'Error: could not determine a valid network interface.\n' >&2
+  printf 'Try supplying it explicitly, for example: %s %s enp113s0\n' "$0" "$target" >&2
+  exit 2
+fi
+
+printf 'Target:    %s\n' "$target"
+printf 'Interface: %s\n\n' "$interface"
+
+printf '%s\n' '--- IPv6 ping (3 packets) ---'
+if ! ping -6 -c 3 -W 2 -I "$interface" "$target"; then
+  printf '\nNo ping reply. This does not necessarily mean the device is absent; some devices block ICMPv6 or may be asleep.\n'
+fi
+
+printf '\n%s\n' '--- Neighbour lookup ---'
+neighbour_line=$(ip -6 neigh show to "$target" dev "$interface" | awk 'NR == 1 { print; exit }')
+
+if [[ -z $neighbour_line ]]; then
+  printf 'No neighbour-cache entry was found for %s.\n' "$target"
+  printf 'It may be offline, the cache may have expired, or this may be a retired IPv6 privacy address.\n'
+  exit 0
+fi
+
+printf '%s\n' "$neighbour_line"
+mac=$(awk '{
+  for (i = 1; i <= NF; i++) {
+    if ($i == "lladdr") {
+      print $(i + 1)
+      exit
+    }
+  }
+}' <<<"$neighbour_line")
+
+if [[ -z $mac ]]; then
+  printf '\nThe entry has no MAC address yet (it may be INCOMPLETE or FAILED).\n'
+  printf 'Try again while the device is awake and actively using the network.\n'
+  exit 0
+fi
+
+printf '\nMAC address: %s\n' "$mac"
+printf '\n%s\n' '--- Other cached addresses using this MAC ---'
+
+mapfile -t matching_entries < <(ip neigh show | grep -iF "lladdr $mac" | sort -u || true)
+
+if [[ ${#matching_entries[@]} -eq 0 ]]; then
+  printf 'No other cached addresses were found.\n'
+  exit 0
+fi
+
+printf '%s\n' "${matching_entries[@]}"
+printf '\n%s\n' '--- Locally resolvable names ---'
+
+found_name=0
+for entry in "${matching_entries[@]}"; do
+  address=${entry%% *}
+  address=${address%%%*}
+  name=$(getent hosts "$address" 2>/dev/null | awk 'NR == 1 { print $2; exit }')
+  if [[ -n $name ]]; then
+    printf '%-42s %s\n' "$address" "$name"
+    found_name=1
+  fi
+done
+
+if [[ $found_name -eq 0 ]]; then
+  printf 'No names were found in DNS or /etc/hosts. Check the FRITZ!Box and Deco client lists using MAC %s.\n' "$mac"
+fi
